@@ -1,0 +1,17 @@
+[package]
+name = "apmnix"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+gtk4 = { version = "0.9", features = ["v4_12"] }
+libadwaita = { version = "0.7", features = ["v1_4"] }
+reqwest = { version = "0.12", features = ["json", "blocking", "brotli"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1", features = ["full"] }
+glib = "0.20"
+
+[package.metadata.system-deps]
+gtk4 = "4"
+libadwaita = "1"
