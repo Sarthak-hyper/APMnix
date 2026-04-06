@@ -1,28 +1,132 @@
-use std::fs;
-use std::path::Path;
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::io::Write;
 
-const CONFIG_PATH: &str = "/etc/nixos/configuration.nix";
+// ── Path helpers ──────────────────────────────────────────────
 
-// Read config using sudo
-fn read_config() -> Result<String, String> {
-    let output = Command::new("sudo")
-        .args(["cat", CONFIG_PATH])
-        .output()
-        .map_err(|e| e.to_string())?;
+fn home_nix_path() -> PathBuf {
+    //let home = std::env::var("HOME").unwrap_or_else(|_| "/home/user".to_string());
+    PathBuf::from("/home/.dotfiles/home.nix")
+}
 
+fn system_nix_path() -> PathBuf {
+    //let home = std::env::var("HOME").unwrap_or_else(|_| "/home/user".to_string());
+    PathBuf::from("/home/.dotfiles/configuration.nix")
+}
+
+// ── Generic read/write ────────────────────────────────────────
+
+fn read_file(path: &str) -> Result<String, String> {
+    std::fs::read_to_string(path).map_err(|e| e.to_string())
+}
+
+fn write_file(path: &str, content: &str) -> Result<(), String> {
+    std::fs::write(path, content).map_err(|e| e.to_string())
+}
+
+fn read_system_config() -> Result<String, String> {
+    let path = system_nix_path();
+    read_file(path.to_str().ok_or("Invalid system config path")?)
+}
+
+fn write_system_config(content: &str) -> Result<(), String> {
+    let path = system_nix_path();
+    write_file(path.to_str().ok_or("Invalid system config path")?, content)
+}
+
+// ── User (home-manager) install ───────────────────────────────
+pub fn add_package_user(attribute: &str) -> Result<(), String> {
+    let path = home_nix_path();
+    let path_str = path.to_str().ok_or("Invalid home.nix path")?;
+
+    let content = read_file(path_str)
+        .map_err(|e| format!("Could not read {}: {}", path_str, e))?;
+
+    if content.contains(&format!("pkgs.{}", attribute)) {
+        return Ok(());
+    }
+
+    let new_content = insert_package_into_nix(&content, attribute)?;
+    write_file(path_str, &new_content)
+        .map_err(|e| format!("Could not write {}: {}", path_str, e))?;
+
+    let user = std::env::var("USER").unwrap_or("iamdagar".to_string());
+    let home = std::env::var("HOME").unwrap_or(format!("/home/{}", user));
+    let current_path = std::env::var("PATH").unwrap_or_default();
+
+    // home-manager channel is now at user level
+    let full_nix_path = format!(
+        "{}:home-manager=/home/{}/.nix-defexpr/channels/home-manager",
+        std::env::var("NIX_PATH").unwrap_or_default(),
+        user
+    );
+
+    let output = Command::new("home-manager")
+        .args(["switch"])
+        .env("HOME", &home)
+        .env("USER", &user)
+        .env("PATH", &current_path)
+        .env("NIX_PATH", &full_nix_path)
+        .env("NIXPKGS_ALLOW_UNFREE","1")
+	.output()
+        .map_err(|e| format!("home-manager not found: {}", e))?;
+
+    println!("STDOUT: {}", String::from_utf8_lossy(&output.stdout));
+    println!("STDERR: {}", String::from_utf8_lossy(&output.stderr));
+    println!("STATUS: {}", output.status.success());
     if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+        Ok(())
     } else {
+        write_file(path_str, &content).ok();
         Err(String::from_utf8_lossy(&output.stderr).to_string())
     }
 }
 
-// Write config using sudo tee
-fn write_config(content: &str) -> Result<(), String> {
+pub fn remove_package_user(attribute: &str) -> Result<(), String> {
+    let path = home_nix_path();
+    let path_str = path.to_str().ok_or("Invalid home.nix path")?;
+
+    let content = read_file(path_str).map_err(|e| e.to_string())?;
+    let new_content = remove_package_from_nix(&content, attribute);
+    write_file(path_str, &new_content).map_err(|e| e.to_string())?;
+
+    let output = Command::new("home-manager")
+        .arg("switch")
+        .output()
+        .map_err(|e| format!("home-manager not found: {}", e))?;
+
+    if !output.status.success() {
+        write_file(path_str, &content).ok();
+        return Err(String::from_utf8_lossy(&output.stderr).to_string());
+    }
+    Ok(())
+}
+
+pub fn is_installed_user(attribute: &str) -> bool {
+    let path = home_nix_path();
+    read_file(path.to_str().unwrap_or(""))
+        .map(|c| c.contains(&format!("pkgs.{}", attribute)))
+        .unwrap_or(false)
+}
+
+// ── System (nixos) install ────────────────────────────────────
+
+pub fn add_package_system(attribute: &str, sudo_password: &str) -> Result<(), String> {
+    verify_sudo(sudo_password)?;
+    backup_system_config()?;
+
+    let content = read_system_config()?;
+
+    if content.contains(&format!("pkgs.{}", attribute)) {
+        return Ok(());
+    }
+
+    let new_content = insert_package_into_nix(&content, attribute)?;
+    write_system_config(&new_content)?;
+
+    // nixos-rebuild switch
     let mut child = Command::new("sudo")
-        .args(["tee", CONFIG_PATH])
+        .args(["-S", "nixos-rebuild", "switch"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -30,121 +134,151 @@ fn write_config(content: &str) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
 
     if let Some(stdin) = child.stdin.as_mut() {
-        stdin.write_all(content.as_bytes())
+        stdin
+            .write_all(format!("{}\n", sudo_password).as_bytes())
             .map_err(|e| e.to_string())?;
     }
 
-    let output = child.wait_with_output()
-        .map_err(|e| e.to_string())?;
-
+    let output = child.wait_with_output().map_err(|e| e.to_string())?;
     if output.status.success() {
         Ok(())
     } else {
+        restore_system_backup().ok();
         Err(String::from_utf8_lossy(&output.stderr).to_string())
     }
 }
 
-pub fn add_package(attribute: &str) -> Result<(), String> {
-    let content = read_config()?;
+pub fn remove_package_system(attribute: &str, sudo_password: &str) -> Result<(), String> {
+    verify_sudo(sudo_password)?;
+    backup_system_config()?;
+    
+    let content = read_system_config()?;
+    let new_content = remove_package_from_nix(&content, attribute);
+    write_system_config(&new_content)?;
 
-    // Already installed
-    if content.contains(&format!("pkgs.{}", attribute)) {
-        println!("{} already in configuration.nix", attribute);
-        return Ok(());
+    let mut child = Command::new("sudo")
+        .args(["-S", "nixos-rebuild", "switch"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| e.to_string())?;
+
+    if let Some(stdin) = child.stdin.as_mut() {
+        stdin
+            .write_all(format!("{}\n", sudo_password).as_bytes())
+            .map_err(|e| e.to_string())?;
     }
 
-    let new_content = if content.contains("environment.systemPackages = with pkgs; [") {
-        content.replace(
+    let output = child.wait_with_output().map_err(|e| e.to_string())?;
+    if !output.status.success() {
+        restore_system_backup().ok();
+        return Err(String::from_utf8_lossy(&output.stderr).to_string());
+    }
+    Ok(())
+}
+
+pub fn is_installed_system(attribute: &str) -> bool {
+    read_system_config()
+        .map(|c| c.contains(&format!("pkgs.{}", attribute)))
+        .unwrap_or(false)
+}
+
+// ── Shared helpers ────────────────────────────────────────────
+
+fn insert_package_into_nix(content: &str, attribute: &str) -> Result<String, String> {
+    if content.contains("home.packages = with pkgs; [") {
+        return Ok(content.replace(
+            "home.packages = with pkgs; [",
+            &format!("home.packages = with pkgs; [\n    pkgs.{}", attribute),
+        ));
+    }
+
+    if content.contains("environment.systemPackages = with pkgs; [") {
+        return Ok(content.replace(
             "environment.systemPackages = with pkgs; [",
             &format!(
                 "environment.systemPackages = with pkgs; [\n    pkgs.{}",
                 attribute
             ),
-        )
-    } else {
-        // Find last } and insert before it
-        let pos = content.rfind('}')
-            .ok_or("Could not find closing brace in configuration.nix")?;
+        ));
+    }
 
-        let mut new = content.clone();
-        new.insert_str(
-            pos,
-            &format!(
-                "  environment.systemPackages = with pkgs; [\n    pkgs.{}\n  ];\n",
-                attribute
-            ),
-        );
-        new
-    };
+    let pos = content
+        .rfind('}')
+        .ok_or("Could not find closing brace in Nix file")?;
 
-    write_config(&new_content)?;
-    println!("Added {} to configuration.nix", attribute);
-    Ok(())
+    let mut new = content.to_string();
+    new.insert_str(
+        pos,
+        &format!(
+            "  home.packages = with pkgs; [\n    pkgs.{}\n  ];\n",
+            attribute
+        ),
+    );
+    Ok(new)
 }
 
-pub fn remove_package(attribute: &str) -> Result<(), String> {
-    let content = read_config()?;
-
-    let new_content = content
+fn remove_package_from_nix(content: &str, attribute: &str) -> String {
+    content
         .lines()
         .filter(|line| !line.contains(&format!("pkgs.{}", attribute)))
         .collect::<Vec<&str>>()
-        .join("\n");
+        .join("\n")
+}
 
-    write_config(&new_content)?;
-    println!("Removed {} from configuration.nix", attribute);
+fn verify_sudo(password: &str) -> Result<(), String> {
+    let mut child = Command::new("sudo")
+        .args(["-S", "true"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| e.to_string())?;
+
+    if let Some(stdin) = child.stdin.as_mut() {
+        stdin
+            .write_all(format!("{}\n", password).as_bytes())
+            .map_err(|e| e.to_string())?;
+    }
+
+    let output = child.wait_with_output().map_err(|e| e.to_string())?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err("Incorrect sudo password".to_string())
+    }
+}
+
+// Backup logic updated to use local file copying since we no longer need sudo for .dotfiles/
+fn backup_system_config() -> Result<(), String> {
+    let path = system_nix_path();
+    let backup = path.with_extension("nix.bak");
+    std::fs::copy(&path, &backup).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn restore_system_backup() -> Result<(), String> {
+    let path = system_nix_path();
+    let backup = path.with_extension("nix.bak");
+    if backup.exists() {
+        std::fs::copy(&backup, &path).map_err(|e| e.to_string())?;
+    }
     Ok(())
 }
 
 pub fn is_installed(attribute: &str) -> bool {
-    read_config()
-        .map(|c| c.contains(&format!("pkgs.{}", attribute)))
-        .unwrap_or(false)
-}
-
-pub fn get_installed_packages() -> Vec<String> {
-    let content = read_config().unwrap_or_default();
-    let mut packages = Vec::new();
-
-    for line in content.lines() {
-        let line = line.trim();
-        if line.starts_with("pkgs.") {
-            let pkg = line
-                .trim_start_matches("pkgs.")
-                .trim_end_matches(';')
-                .trim()
-                .to_string();
-            if !pkg.is_empty() {
-                packages.push(pkg);
-            }
-        }
-    }
-
-    packages
+    is_installed_user(attribute) || is_installed_system(attribute)
 }
 
 pub fn backup_config() -> Result<(), String> {
-    let backup_path = format!("{}.bak", CONFIG_PATH);
-
-    let mut child = Command::new("sudo")
-        .args(["cp", CONFIG_PATH, &backup_path])
-        .spawn()
-        .map_err(|e| e.to_string())?;
-
-    child.wait().map_err(|e| e.to_string())?;
-    println!("Backup saved to {}", backup_path);
     Ok(())
 }
 
 pub fn restore_backup() -> Result<(), String> {
-    let backup_path = format!("{}.bak", CONFIG_PATH);
-
-    let mut child = Command::new("sudo")
-        .args(["cp", &backup_path, CONFIG_PATH])
-        .spawn()
-        .map_err(|e| e.to_string())?;
-
-    child.wait().map_err(|e| e.to_string())?;
-    println!("Restored from backup");
     Ok(())
+}
+
+pub fn add_package(attribute: &str) -> Result<(), String> {
+    add_package_user(attribute)
 }

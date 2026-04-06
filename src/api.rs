@@ -86,7 +86,7 @@ pub fn get_curated(all: &[Package]) -> Vec<Package> {
         "vscode", "git", "vim", "neovim", "htop", "btop",
         "neofetch", "discord", "telegram-desktop", "obs-studio",
         "thunderbird", "inkscape", "blender", "mpv", "transmission",
-        "flameshot", "python3", "nodejs", "gcc", "cmake",
+        "flameshot", "python3", "nodejs", "gcc13", "cmake",
     ];
 
     curated.iter()
