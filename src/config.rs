@@ -3,17 +3,15 @@ use std::process::{Command, Stdio};
 use std::io::Write;
 
 // ── Path helpers ──────────────────────────────────────────────
-
 fn home_nix_path() -> PathBuf {
-    //let home = std::env::var("HOME").unwrap_or_else(|_| "/home/user".to_string());
-    PathBuf::from("/home/.dotfiles/home.nix")
+    let user = std::env::var("USER").unwrap_or("user".to_string());
+    PathBuf::from(format!("/home/{}/.dotfiles/home.nix", user))
 }
 
 fn system_nix_path() -> PathBuf {
-    //let home = std::env::var("HOME").unwrap_or_else(|_| "/home/user".to_string());
-    PathBuf::from("/home/.dotfiles/configuration.nix")
+    let user = std::env::var("USER").unwrap_or("user".to_string());
+    PathBuf::from(format!("/home/{}/.dotfiles/configuration.nix", user))
 }
-
 // ── Generic read/write ────────────────────────────────────────
 
 fn read_file(path: &str) -> Result<String, String> {
@@ -43,40 +41,24 @@ pub fn add_package_user(attribute: &str) -> Result<(), String> {
         .map_err(|e| format!("Could not read {}: {}", path_str, e))?;
 
     if content.contains(&format!("pkgs.{}", attribute)) {
-        return Ok(());
+        return Ok(()); // already present
     }
 
     let new_content = insert_package_into_nix(&content, attribute)?;
     write_file(path_str, &new_content)
         .map_err(|e| format!("Could not write {}: {}", path_str, e))?;
 
-    let user = std::env::var("USER").unwrap_or("iamdagar".to_string());
-    let home = std::env::var("HOME").unwrap_or(format!("/home/{}", user));
-    let current_path = std::env::var("PATH").unwrap_or_default();
+    // Fix: Force home-manager to use our custom path via the HOME_MANAGER_CONFIG environment variable
+    let cmd_str = format!("HOME_MANAGER_CONFIG=\"{}\" home-manager switch", path_str);
+    let output = Command::new("bash")
+        .args(["-l", "-c", &cmd_str])
+        .output()
+        .map_err(|e| format!("Failed to execute home-manager: {}", e))?;
 
-    // home-manager channel is now at user level
-    let full_nix_path = format!(
-        "{}:home-manager=/home/{}/.nix-defexpr/channels/home-manager",
-        std::env::var("NIX_PATH").unwrap_or_default(),
-        user
-    );
-
-    let output = Command::new("home-manager")
-        .args(["switch"])
-        .env("HOME", &home)
-        .env("USER", &user)
-        .env("PATH", &current_path)
-        .env("NIX_PATH", &full_nix_path)
-        .env("NIXPKGS_ALLOW_UNFREE","1")
-	.output()
-        .map_err(|e| format!("home-manager not found: {}", e))?;
-
-    println!("STDOUT: {}", String::from_utf8_lossy(&output.stdout));
-    println!("STDERR: {}", String::from_utf8_lossy(&output.stderr));
-    println!("STATUS: {}", output.status.success());
     if output.status.success() {
         Ok(())
     } else {
+        // Roll back the file change
         write_file(path_str, &content).ok();
         Err(String::from_utf8_lossy(&output.stderr).to_string())
     }
@@ -90,10 +72,12 @@ pub fn remove_package_user(attribute: &str) -> Result<(), String> {
     let new_content = remove_package_from_nix(&content, attribute);
     write_file(path_str, &new_content).map_err(|e| e.to_string())?;
 
-    let output = Command::new("home-manager")
-        .arg("switch")
+    // Fix: Force home-manager to use our custom path via the HOME_MANAGER_CONFIG environment variable
+    let cmd_str = format!("HOME_MANAGER_CONFIG=\"{}\" home-manager switch", path_str);
+    let output = Command::new("bash")
+        .args(["-l", "-c", &cmd_str])
         .output()
-        .map_err(|e| format!("home-manager not found: {}", e))?;
+        .map_err(|e| format!("Failed to execute home-manager: {}", e))?;
 
     if !output.status.success() {
         write_file(path_str, &content).ok();
