@@ -4,14 +4,15 @@ use std::io::Write;
 
 // ── Path helpers ──────────────────────────────────────────────
 fn home_nix_path() -> PathBuf {
-    let user = std::env::var("USER").unwrap_or("user".to_string());
+    let user = std::env::var("USER").unwrap_or_else(|_| "user".to_string());
     PathBuf::from(format!("/home/{}/.dotfiles/home.nix", user))
 }
 
 fn system_nix_path() -> PathBuf {
-    let user = std::env::var("USER").unwrap_or("user".to_string());
+    let user = std::env::var("USER").unwrap_or_else(|_| "user".to_string());
     PathBuf::from(format!("/home/{}/.dotfiles/configuration.nix", user))
 }
+
 // ── Generic read/write ────────────────────────────────────────
 
 fn read_file(path: &str) -> Result<String, String> {
@@ -33,6 +34,7 @@ fn write_system_config(content: &str) -> Result<(), String> {
 }
 
 // ── User (home-manager) install ───────────────────────────────
+
 pub fn add_package_user(attribute: &str) -> Result<(), String> {
     let path = home_nix_path();
     let path_str = path.to_str().ok_or("Invalid home.nix path")?;
@@ -48,7 +50,7 @@ pub fn add_package_user(attribute: &str) -> Result<(), String> {
     write_file(path_str, &new_content)
         .map_err(|e| format!("Could not write {}: {}", path_str, e))?;
 
-    // Fix: Force home-manager to use our custom path via the HOME_MANAGER_CONFIG environment variable
+    // Force home-manager to use our custom path via the HOME_MANAGER_CONFIG environment variable
     let cmd_str = format!("HOME_MANAGER_CONFIG=\"{}\" home-manager switch", path_str);
     let output = Command::new("bash")
         .args(["-l", "-c", &cmd_str])
@@ -72,7 +74,7 @@ pub fn remove_package_user(attribute: &str) -> Result<(), String> {
     let new_content = remove_package_from_nix(&content, attribute);
     write_file(path_str, &new_content).map_err(|e| e.to_string())?;
 
-    // Fix: Force home-manager to use our custom path via the HOME_MANAGER_CONFIG environment variable
+    // Force home-manager to use our custom path via the HOME_MANAGER_CONFIG environment variable
     let cmd_str = format!("HOME_MANAGER_CONFIG=\"{}\" home-manager switch", path_str);
     let output = Command::new("bash")
         .args(["-l", "-c", &cmd_str])
@@ -89,7 +91,10 @@ pub fn remove_package_user(attribute: &str) -> Result<(), String> {
 pub fn is_installed_user(attribute: &str) -> bool {
     let path = home_nix_path();
     read_file(path.to_str().unwrap_or(""))
-        .map(|c| c.contains(&format!("pkgs.{}", attribute)))
+        .map(|c| {
+            c.contains(&format!("pkgs.{}", attribute)) ||
+            c.lines().any(|line| line.trim() == attribute || line.trim().starts_with(&format!("{} ", attribute)))
+        })
         .unwrap_or(false)
 }
 
@@ -164,13 +169,17 @@ pub fn remove_package_system(attribute: &str, sudo_password: &str) -> Result<(),
 
 pub fn is_installed_system(attribute: &str) -> bool {
     read_system_config()
-        .map(|c| c.contains(&format!("pkgs.{}", attribute)))
+        .map(|c| {
+            c.contains(&format!("pkgs.{}", attribute)) ||
+            c.lines().any(|line| line.trim() == attribute || line.trim().starts_with(&format!("{} ", attribute)))
+        })
         .unwrap_or(false)
 }
 
 // ── Shared helpers ────────────────────────────────────────────
 
 fn insert_package_into_nix(content: &str, attribute: &str) -> Result<String, String> {
+    // 1. Check user packages (WITH pkgs)
     if content.contains("home.packages = with pkgs; [") {
         return Ok(content.replace(
             "home.packages = with pkgs; [",
@@ -178,16 +187,31 @@ fn insert_package_into_nix(content: &str, attribute: &str) -> Result<String, Str
         ));
     }
 
-    if content.contains("environment.systemPackages = with pkgs; [") {
+    // 2. Check user packages (WITHOUT pkgs)
+    if content.contains("home.packages = [") {
         return Ok(content.replace(
-            "environment.systemPackages = with pkgs; [",
-            &format!(
-                "environment.systemPackages = with pkgs; [\n    pkgs.{}",
-                attribute
-            ),
+            "home.packages = [",
+            &format!("home.packages = [\n    pkgs.{}", attribute),
         ));
     }
 
+    // 3. Check system packages (WITH pkgs)
+    if content.contains("environment.systemPackages = with pkgs; [") {
+        return Ok(content.replace(
+            "environment.systemPackages = with pkgs; [",
+            &format!("environment.systemPackages = with pkgs; [\n    pkgs.{}", attribute),
+        ));
+    }
+
+    // 4. Check system packages (WITHOUT pkgs)
+    if content.contains("environment.systemPackages = [") {
+        return Ok(content.replace(
+            "environment.systemPackages = [",
+            &format!("environment.systemPackages = [\n    pkgs.{}", attribute),
+        ));
+    }
+
+    // Fallback: If neither exists, append a new block at the end of the file
     let pos = content
         .rfind('}')
         .ok_or("Could not find closing brace in Nix file")?;
@@ -206,7 +230,22 @@ fn insert_package_into_nix(content: &str, attribute: &str) -> Result<String, Str
 fn remove_package_from_nix(content: &str, attribute: &str) -> String {
     content
         .lines()
-        .filter(|line| !line.contains(&format!("pkgs.{}", attribute)))
+        .filter(|line| {
+            let trimmed = line.trim();
+            
+            // Check if the line is exactly "btop" or "pkgs.btop"
+            let is_exact_attr = trimmed == attribute || trimmed == format!("pkgs.{}", attribute);
+            
+            // Check if they left a comment next to it, e.g., "btop # system monitor"
+            let starts_with_attr = trimmed.starts_with(&format!("{} ", attribute)) 
+                || trimmed.starts_with(&format!("pkgs.{} ", attribute));
+
+            // Standard check just in case
+            let contains_pkgs = line.contains(&format!("pkgs.{}", attribute));
+
+            // If it matches ANY of the above conditions, filter it out (remove it)
+            !(is_exact_attr || starts_with_attr || contains_pkgs)
+        })
         .collect::<Vec<&str>>()
         .join("\n")
 }
