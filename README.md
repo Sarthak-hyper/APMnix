@@ -1,10 +1,10 @@
 # APMNix 🦴
 Package manager GUI for VimuktiOS (NixOS based)
 
-##Its in its initial states
-Right now it is in its initial state with hell lotta errors I am working on it with my top priority
+## Its in its initial states
+Right now it is in its initial state with hell lotta errors we are working on it with our top priority
 
-##What to do, to make it Run
+## What to do, to make it Run
 -First fault is, it cannot run with flakes
 -Second is you need to make .dotfiles in the home directory /home/(your username)/.dotfiles
 After copying your configuration.nix and hardware-configuration.nix to the .dotfiles directory
