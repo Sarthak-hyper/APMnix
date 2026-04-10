@@ -1,7 +1,7 @@
 # APMNix 🦴
 Package manager GUI for VimuktiOS (NixOS based)
 
-## Its in its initial states
+## Initial state WARNING
 Right now it is in its initial state with hell lotta errors we are working on it with our top priority
 
 ## What to do, to make it Run
