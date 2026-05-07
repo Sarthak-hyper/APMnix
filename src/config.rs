@@ -33,6 +33,24 @@ fn write_system_config(content: &str) -> Result<(), String> {
     write_file(path.to_str().ok_or("Invalid system config path")?, content)
 }
 
+fn stage_file(filepath: &str) -> Result<(), String> {
+    let path = std::path::Path::new(filepath);
+    // Determine the repository directory (assumes the file is immediately inside .dotfiles)
+    let repo_dir = path.parent().unwrap_or(std::path::Path::new("/"));
+    
+    let output = Command::new("git")
+        .current_dir(repo_dir)
+        .args(["add", filepath])
+        .output()
+        .map_err(|e| format!("Failed to execute git add: {}", e))?;
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&output.stderr).to_string())
+    }
+}
+
 // ── User (home-manager) install ───────────────────────────────
 
 pub fn add_package_user(attribute: &str) -> Result<(), String> {
@@ -50,8 +68,15 @@ pub fn add_package_user(attribute: &str) -> Result<(), String> {
     write_file(path_str, &new_content)
         .map_err(|e| format!("Could not write {}: {}", path_str, e))?;
 
-    // Force home-manager to use our custom path via the HOME_MANAGER_CONFIG environment variable
-    let cmd_str = format!("HOME_MANAGER_CONFIG=\"{}\" home-manager switch", path_str);
+    // Stage the file for Flakes
+    if let Err(e) = stage_file(path_str) {
+        write_file(path_str, &content).ok(); // Rollback if git fails
+        return Err(e);
+    }
+
+    let user = std::env::var("USER").unwrap_or_else(|_| "user".to_string());
+    let cmd_str = format!("home-manager switch --flake /home/{}/.dotfiles#{}",user, user);
+
     let output = Command::new("bash")
         .args(["-l", "-c", &cmd_str])
         .output()
@@ -74,8 +99,15 @@ pub fn remove_package_user(attribute: &str) -> Result<(), String> {
     let new_content = remove_package_from_nix(&content, attribute);
     write_file(path_str, &new_content).map_err(|e| e.to_string())?;
 
-    // Force home-manager to use our custom path via the HOME_MANAGER_CONFIG environment variable
-    let cmd_str = format!("HOME_MANAGER_CONFIG=\"{}\" home-manager switch", path_str);
+    // Stage the file for Flakes
+    if let Err(e) = stage_file(path_str) {
+        write_file(path_str, &content).ok();
+        return Err(e);
+    }
+
+    let user = std::env::var("USER").unwrap_or_else(|_| "user".to_string());
+    let cmd_str = format!("home-manager switch --flake /home/{}/.dotfiles#{}",user, user);
+
     let output = Command::new("bash")
         .args(["-l", "-c", &cmd_str])
         .output()
@@ -113,9 +145,25 @@ pub fn add_package_system(attribute: &str, sudo_password: &str) -> Result<(), St
     let new_content = insert_package_into_nix(&content, attribute)?;
     write_system_config(&new_content)?;
 
-    // nixos-rebuild switch
+    // Stage the file for Flakes
+    let path = system_nix_path();
+    let path_str = path.to_str().ok_or("Invalid system config path")?;
+    if let Err(e) = stage_file(path_str) {
+        restore_system_backup().ok();
+        return Err(e);
+    }
+
+    let user = std::env::var("USER").unwrap_or_else(|_| "user".to_string());
+    let hostname = std::fs::read_to_string("/etc/hostname")
+        .unwrap_or_else(|_| "default".to_string())
+        .trim()
+        .to_string();
+
+    let flake_path = format!("/home/{}/.dotfiles#{}", user, hostname);
+
+    // nixos-rebuild switch using flakes
     let mut child = Command::new("sudo")
-        .args(["-S", "nixos-rebuild", "switch"])
+        .args(["-S", "nixos-rebuild", "switch", "--flake", &flake_path])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -145,8 +193,24 @@ pub fn remove_package_system(attribute: &str, sudo_password: &str) -> Result<(),
     let new_content = remove_package_from_nix(&content, attribute);
     write_system_config(&new_content)?;
 
+    // Stage the file for Flakes
+    let path = system_nix_path();
+    let path_str = path.to_str().ok_or("Invalid system config path")?;
+    if let Err(e) = stage_file(path_str) {
+        restore_system_backup().ok();
+        return Err(e);
+    }
+
+    let user = std::env::var("USER").unwrap_or_else(|_| "user".to_string());
+    let hostname = std::fs::read_to_string("/etc/hostname")
+        .unwrap_or_else(|_| "default".to_string())
+        .trim()
+        .to_string();
+
+    let flake_path = format!("/home/{}/.dotfiles#{}", user, hostname);
+
     let mut child = Command::new("sudo")
-        .args(["-S", "nixos-rebuild", "switch"])
+        .args(["-S", "nixos-rebuild", "switch", "--flake", &flake_path])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
